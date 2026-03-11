@@ -100,7 +100,7 @@ pip install streamlit pandas plotly reportlab kaleido
 Start the Streamlit server:
 
 ```
-streamlit run app.py
+streamlit run expense_tracker.py
 ```
 
 Then open your browser and visit:
