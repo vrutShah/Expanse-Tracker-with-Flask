@@ -137,8 +137,15 @@ def generate_pdf(df, fig, start, end):
     doc.build(elements)
     return file
 
-# --- UI: SIDEBAR ---
+ # --- UI: SIDEBAR ---
 with st.sidebar:
+    # --- LOGO ---
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        st.image("expense_tracker.png", width=120)
+        # --- TAGLINE ---
+    st.markdown("<h5 style='text-align: center; color: gray;'>Track Smart. Spend Wise with Vrut Shah</h5>", unsafe_allow_html=True)
+
     st.title("⚙️ Settings")
 
     # FIX 3: Working Add Expense form using session_state toggle
