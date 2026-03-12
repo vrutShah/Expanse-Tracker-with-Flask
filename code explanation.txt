@@ -1,0 +1,562 @@
+# 1. **Importing Libraries**
+
+```python
+import streamlit as st
+import pandas as pd
+import plotly.express as px
+import plotly.io as pio
+import os
+from datetime import datetime, date
+from io import BytesIO
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib import colors
+```
+
+- `streamlit`: Framework to create interactive web apps easily.
+- `pandas`: For data manipulation (loading/saving expenses).
+- `plotly.express` & `plotly.io`: For making interactive charts and exporting images.
+- `os`: To check if files exist.
+- `datetime`: Working with dates and times.
+- `BytesIO`: In-memory bytes buffer for images.
+- `reportlab`: To generate PDFs with tables, paragraphs, images, and styles.
+
+---
+
+# 2. **Configuration**
+
+```python
+st.set_page_config(page_title="Expense Tracker", layout="wide")
+EXPENSE_FILE = "expenses.csv"
+CATEGORY_FILE = "categories.csv"
+```
+
+- Sets the webpage title and layout to wide.
+- Defines filenames to save expenses and categories as CSV files.
+
+---
+
+# 3. **Helper Functions: Data Loading and Saving**
+
+### a. `load_data()` — Load expense data from file or create empty with correct types
+
+```python
+def load_data():
+    if os.path.exists(EXPENSE_FILE):
+        df = pd.read_csv(EXPENSE_FILE)
+        # Parse Date column with expected string format
+        df["Date"] = pd.to_datetime(df["Date"], format="%d-%m-%Y %I:%M %p", errors="coerce")
+        df = df.dropna(subset=["Date"])  # Remove rows where date conversion failed
+        return df
+    
+    # If file doesn't exist, create empty DataFrame with types specified (important for .dt accessor)
+    df = pd.DataFrame(columns=["Date", "Category", "Amount", "Description"])
+    df["Date"] = pd.to_datetime(df["Date"])  # Set as datetime dtype, even if empty
+    df["Amount"] = df["Amount"].astype(float)
+    return df
+```
+
+- Tries to read the CSV file.
+- Converts "Date" column from string to datetime with a specific format.
+- Drops rows that fail date parsing.
+- If no file exists, creates an _empty_ DataFrame with the right column data types — this prevents errors when accessing date functions later on `.dt`.
+
+---
+
+### b. `save_data()` — Save currently loaded expenses back to CSV
+
+```python
+def save_data():
+    df_to_save = st.session_state.expenses.copy()
+    # Convert datetime back to formatted string for saving
+    df_to_save["Date"] = df_to_save["Date"].dt.strftime("%d-%m-%Y %I:%M %p")
+    df_to_save.to_csv(EXPENSE_FILE, index=False)
+```
+
+- Copies the in-memory expense data from Streamlit session state.
+- Formats the Date column as a string using the same pattern as when loading.
+- Saves to `expenses.csv` without the index column.
+
+---
+
+### c. `load_categories()` — Load list of categories
+
+```python
+def load_categories():
+    if os.path.exists(CATEGORY_FILE):
+        return pd.read_csv(CATEGORY_FILE)["Category"].tolist()
+    # Default categories if file doesn't exist
+    return ["Food", "Transport", "Shopping", "Utilities", "Entertainment", "Other"]
+```
+
+- Loads categories from `categories.csv`.
+- Returns a Python list of categories.
+- Returns predefined defaults if file is missing.
+
+---
+
+### d. `save_categories()` — Save current category list back to CSV
+
+```python
+def save_categories():
+    pd.DataFrame({"Category": st.session_state.categories}).to_csv(CATEGORY_FILE, index=False)
+```
+
+- Converts the list of categories in session state to DataFrame.
+- Saves CSV file so categories persist.
+
+---
+
+# 4. **Streamlit Session State Initialization**
+
+```python
+if "expenses" not in st.session_state:
+    st.session_state.expenses = load_data()
+if "categories" not in st.session_state:
+    st.session_state.categories = load_categories()
+if "show_form" not in st.session_state:
+    st.session_state.show_form = False
+```
+
+- Streamlit's session state stores variables persistently across user interactions.
+- If these keys don't exist (on first run), initialize them:
+  - `expenses`: DataFrame with expense entries.
+  - `categories`: list of category strings.
+  - `show_form`: boolean toggle to show/hide the “Add Expense” form.
+
+---
+
+# 5. **PDF Report Generation**
+
+```python
+def generate_pdf(df, fig, start, end):
+    file = "expense_report.pdf"
+    styles = getSampleStyleSheet()
+    
+    elements = [
+        Paragraph("Expense Report", styles["Title"]),
+        Paragraph(f"Period: {start} to {end}", styles["Normal"]),
+        Spacer(1, 20),
+    ]
+```
+
+- Prepares PDF file `expense_report.pdf`.
+- Creates a list `elements` for report parts:
+  - Title
+  - Date range as paragraph
+  - Spacer to add vertical gap
+
+---
+
+### a. Summary Table
+
+```python
+    total = df["Amount"].sum()
+    summary_data = [
+        ["Metric", "Value"],
+        ["Total Spending", f"₹{total:,.2f}"],
+        ["Transactions", str(len(df))],
+    ]
+    summary_table = Table(summary_data, colWidths=[200, 200])
+    summary_table.setStyle(
+        TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#4F8BF9")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f2f2f2")]),
+        ])
+    )
+    elements.append(summary_table)
+    elements.append(Spacer(1, 20))
+```
+
+- Calculates total spending and transaction count.
+- Creates a simple table for these metrics.
+- Styles table header with color, bold font, grid lines, and alternating row backgrounds.
+- Adds the summary table and space after it to the report.
+
+---
+
+### b. Detailed Expenses Table
+
+```python
+    if not df.empty:
+        detail_data = [["Date", "Category", "Amount", "Description"]]
+        for _, row in df.iterrows():
+            detail_data.append([
+                row["Date"].strftime("%d-%m-%Y"),
+                str(row["Category"]),
+                f"₹{row['Amount']:,.2f}",
+                str(row["Description"]),
+            ])
+        detail_table = Table(detail_data, colWidths=[100, 100, 80, 220])
+        detail_table.setStyle(
+            TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#4F8BF9")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f2f2f2")]),
+                ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ])
+        )
+        elements.append(Paragraph("Expense Details", styles["Heading2"]))
+        elements.append(Spacer(1, 10))
+        elements.append(detail_table)
+        elements.append(Spacer(1, 20))
+```
+
+- If expenses are not empty:
+  - Prepares headers and each transaction as rows.
+  - Formats dates and amounts nicely for the PDF.
+  - Creates a styled table similarly to the summary.
+  - Adds heading, table, and spacing to the elements list.
+
+---
+
+### c. Embedding Chart Image
+
+```python
+    try:
+        color_fig = fig
+        color_fig.update_layout(
+            template="plotly_white",
+            paper_bgcolor="white",
+            plot_bgcolor="white",
+            font=dict(color="black"),
+            colorway=[
+                "#636EFA", "#EF553B", "#00CC96", "#AB63FA", "#FFA15A",
+                "#19D3F3", "#FF6692", "#B6E880", "#FF97FF", "#FECB52",
+            ],
+        )
+        img_data = BytesIO()
+        pio.write_image(color_fig, img_data, format="png", width=900, height=450, scale=2)
+        img_data.seek(0)
+        elements.append(Paragraph("Spending Chart", styles["Heading2"]))
+        elements.append(Spacer(1, 10))
+        elements.append(Image(img_data, width=480, height=240))
+    except Exception as e:
+        elements.append(
+            Paragraph(
+                f"Chart image could not be embedded ({e}). Install kaleido via pip to enable this.",
+                styles["Normal"],
+            )
+        )
+```
+
+- Attempts to export the Plotly figure as a PNG image using `kaleido` engine (Plotly's image export backend).
+- Sets plot background and colors to white for consistency.
+- Converts image bytes to ReportLab Image object.
+- If export fails (e.g., kaleido not installed), shows a warning paragraph.
+
+---
+
+### d. Final PDF build and save
+
+```python
+    doc = SimpleDocTemplate(file, pagesize=A4)
+    doc.build(elements)
+    return file
+```
+
+- Creates the PDF document with the A4 page size.
+- Adds all report elements to PDF builder.
+- Saves and returns the filename.
+
+---
+
+# 6. **Sidebar UI**
+
+```python
+with st.sidebar:
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        st.image("expense_tracker.png", width=120)
+    st.markdown("<h5 style='text-align: center; color: gray;'>Track Smart. Spend Wise with Vrut Shah</h5>", unsafe_allow_html=True)
+
+    st.title("⚙️ Settings")
+```
+
+- Sidebar container for navigation and controls.
+- Displays an image/logo centered using 3 columns trick.
+- Displays a subtitle / tagline.
+- Shows a "Settings" header.
+
+---
+
+### a. Add Expense Button and Form
+
+```python
+    if st.button("➕ Add Expense"):
+        st.session_state.show_form = not st.session_state.show_form
+```
+
+- Clicking the button toggles showing the Add Expense form.
+
+```python
+    if st.session_state.show_form:
+        with st.form("add_expense_form", clear_on_submit=True):
+            st.subheader("New Expense")
+            exp_date = st.date_input("Date", value=date.today())
+            exp_time = st.time_input("Time", value=datetime.now().time())
+            exp_category = st.selectbox("Category", st.session_state.categories)
+            exp_amount = st.number_input("Amount (₹)", min_value=0.01, step=0.01, format="%.2f")
+            exp_description = st.text_input("Description")
+            submitted = st.form_submit_button("Save Expense")
+
+            if submitted:
+                exp_datetime = datetime.combine(exp_date, exp_time)
+                new_row = pd.DataFrame([{
+                    "Date": exp_datetime,
+                    "Category": exp_category,
+                    "Amount": float(exp_amount),
+                    "Description": exp_description,
+                }])
+                new_row["Date"] = pd.to_datetime(new_row["Date"])
+                st.session_state.expenses = pd.concat(
+                    [st.session_state.expenses, new_row], ignore_index=True
+                )
+                save_data()
+                st.session_state.show_form = False
+                st.success("Expense added!")
+                st.rerun()
+```
+
+- Displays an interactive form for user input:
+  - Date and time pickers for expense datetime.
+  - Category selector from existing categories.
+  - Numeric input for amount (with min value to prevent zero or negative).
+  - Text for optional description.
+- When "Save Expense" is clicked:
+  - Combines date & time into a single datetime object.
+  - Creates a DataFrame row for the new expense.
+  - Adds new row to existing expenses.
+  - Saves data back to CSV.
+  - Hides form.
+  - Shows success message.
+  - Refreshes the page (`st.rerun()`) to update UI immediately.
+
+---
+
+### b. Category Management
+
+```python
+    st.divider()
+    st.subheader("Manage Categories")
+    cat_to_add = st.text_input("New Category")
+    if st.button("Add Category"):
+        if cat_to_add and cat_to_add not in st.session_state.categories:
+            st.session_state.categories.append(cat_to_add)
+            save_categories()
+            st.success(f"Category '{cat_to_add}' added!")
+        elif not cat_to_add:
+            st.warning("Please enter a category name.")
+        else:
+            st.warning("Category already exists.")
+```
+
+- Lets user add a new category.
+- Input box for text.
+- Button to add new category only if not empty and not duplicate.
+- Saves new category list to CSV for persistence.
+- Shows success or warning messages based on input validity.
+
+---
+
+### c. Danger Zone — Clear all expenses
+
+```python
+    st.divider()
+    st.subheader("Danger Zone")
+    if st.button("🗑️ Clear All Expenses", type="primary"):
+        st.session_state.expenses = load_data().__class__(
+            columns=["Date", "Category", "Amount", "Description"]
+        )
+        st.session_state.expenses["Date"] = pd.to_datetime(st.session_state.expenses["Date"])
+        st.session_state.expenses["Amount"] = st.session_state.expenses["Amount"].astype(float)
+        save_data()
+        st.rerun()
+```
+
+- Provides a destructive button for clearing all expenses (reset).
+- Re-initializes empty DataFrame with proper types.
+- Saves empty data and reruns page.
+
+---
+
+# 7. **Main Dashboard UI**
+
+```python
+st.title("💸 Expense Dashboard")
+
+col1, col2 = st.columns(2)
+with col1:
+    start_date = st.date_input("Start Date", value=date(date.today().year, date.today().month, 1))
+with col2:
+    end_date = st.date_input("End Date", value=date.today())
+```
+
+- Title and two side-by-side date pickers for filtering reporting period.
+- Defaults are start of this month and today.
+
+---
+
+### a. Filter Data by Date Range
+
+```python
+df = st.session_state.expenses
+if not df.empty:
+    mask = (df["Date"].dt.date >= start_date) & (df["Date"].dt.date <= end_date)
+    filtered_df = df.loc[mask].copy()
+else:
+    filtered_df = df.copy()
+```
+
+- Uses `.dt` accessor safely because of the earlier dtype settings.
+- Filters expense rows to those within the selected date range.
+- If no data, just returns empty DataFrame.
+
+---
+
+### b. Calculate & Show KPIs
+
+```python
+total_spend = filtered_df["Amount"].sum()
+num_txns = len(filtered_df)
+avg_spend = filtered_df["Amount"].mean() if num_txns > 0 else 0.0
+top_category = (
+    filtered_df.groupby("Category")["Amount"].sum().idxmax()
+    if num_txns > 0 else "N/A"
+)
+
+k1, k2, k3, k4 = st.columns(4)
+k1.metric("Total Spending", f"₹{total_spend:,.2f}")
+k2.metric("Transactions", num_txns)
+k3.metric("Avg per Transaction", f"₹{avg_spend:,.2f}")
+k4.metric("Top Category", top_category)
+```
+
+- Computes:
+  - Total spending sum over filtered period.
+  - Number of transactions.
+  - Average amount per transaction.
+  - The category with highest spending.
+- Displays these in four columns as KPIs.
+
+---
+
+### c. Show Table of Filtered Expenses
+
+```python
+st.divider()
+st.subheader("📋 Expenses")
+st.dataframe(
+    filtered_df.assign(Date=filtered_df["Date"].dt.strftime("%d-%m-%Y %I:%M %p")),
+    use_container_width=True,
+)
+```
+
+- Displays filtered expense data in a nice table.
+- Formats Date column into readable strings.
+
+---
+
+# 8. **Analytics Section**
+
+```python
+st.divider()
+st.subheader("📊 Analytics")
+
+CHART_TYPES = ["Donut", "Bar", "Line", "Treemap", "Box Plot", "Sunburst"]
+chart_type = st.selectbox("Select Graph", CHART_TYPES)
+
+CHART_COLORS = ["#636EFA","#EF553B","#00CC96","#AB63FA","#FFA15A","#19D3F3","#FF6692","#B6E880","#FF97FF","#FECB52"]
+```
+
+- User selects which kind of chart to visualize expenses with.
+- Predefined color palette for charts.
+
+---
+
+### a. Chart Building Function
+
+```python
+def get_fig(df, ctype):
+    if df.empty:
+        return px.scatter(title="No data available for the selected period.")
+    if ctype == "Donut":
+        return px.pie(df, values="Amount", names="Category", hole=0.4, title="Spending by Category", color_discrete_sequence=CHART_COLORS)
+    if ctype == "Bar":
+        return px.bar(df, x="Category", y="Amount", color="Category", title="Spending by Category", color_discrete_sequence=CHART_COLORS)
+    if ctype == "Line":
+        return px.line(df.sort_values("Date"), x="Date", y="Amount", color="Category", title="Spending Over Time", color_discrete_sequence=CHART_COLORS)
+    if ctype == "Treemap":
+        return px.treemap(df, path=["Category", "Description"], values="Amount", title="Expense Treemap", color_discrete_sequence=CHART_COLORS)
+    if ctype == "Box Plot":
+        return px.box(df, x="Category", y="Amount", title="Spending Distribution by Category", color_discrete_sequence=CHART_COLORS)
+    if ctype == "Sunburst":
+        return px.sunburst(df, path=["Category", "Description"], values="Amount", title="Expense Sunburst", color_discrete_sequence=CHART_COLORS)
+    return px.scatter(title="Unknown chart type")
+```
+
+- Returns an appropriate Plotly figure based on user selection.
+- Uses different chart types to represent expense data visually:
+  - Donut/Pie: % spending by category.
+  - Bar chart: Amount per category.
+  - Line chart: Spending over time per category.
+  - Treemap and Sunburst: Hierarchical views by category and description.
+  - Box plot: Distribution of spending per category.
+
+---
+
+### b. Display the Plot
+
+```python
+fig = get_fig(filtered_df, chart_type)
+st.plotly_chart(fig, use_container_width=True)
+```
+
+- Generates the chosen plot for current filtered data.
+- Displays it responsively.
+
+---
+
+# 9. **PDF Report Generation Button**
+
+```python
+st.divider()
+if st.button("📄 Generate PDF Report"):
+    if filtered_df.empty:
+        st.warning("No data in the selected date range to generate a report.")
+    else:
+        with st.spinner("Generating PDF..."):
+            pdf_path = generate_pdf(filtered_df, fig, start_date, end_date)
+        with open(pdf_path, "rb") as f:
+            st.download_button(
+                label="⬇️ Download PDF",
+                data=f,
+                file_name=f"expense_report_{start_date}_{end_date}.pdf",
+                mime="application/pdf",
+            )
+```
+
+- When clicked:
+  - Warns if no data to report.
+  - Otherwise generates PDF report (including the chart and tables).
+  - Provides a download button for the PDF file.
+
+---
+
+# **Summary**
+
+- The code implements a full expense tracker app using Streamlit.
+- Expense data is stored persistently in CSV files.
+- User can add expenses and categories via sidebar UI.
+- Dashboard filters and summarizes expenses by date range.
+- Interactive charts visualize spending trends and breakdowns.
+- A PDF report can be dynamically generated covering data + charts.
+- Uses best practices such as streamlit session_state for app state management.
+
+This breakdown should help you understand each piece and how they work together! If you'd like, I can explain specific parts in more detail.
